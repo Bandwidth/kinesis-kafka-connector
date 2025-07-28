@@ -1,5 +1,10 @@
 package com.amazon.kinesis.kafka;
 
+import java.io.UnsupportedEncodingException;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
@@ -245,12 +250,26 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		// This will be useful when sending data from same partition into
 		// same shard
 		if (usePartitionAsHashKey)
-			return kp.addUserRecord(streamName, partitionKey, Integer.toString(sinkRecord.kafkaPartition()),
+			return kp.addUserRecord(streamName, partitionKey, hashKafkaPartition(sinkRecord.kafkaPartition()),
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		else
 			return kp.addUserRecord(streamName, partitionKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 
+	}
+
+	public static String hashKafkaPartition(int partition) {
+		MessageDigest md;
+		try {
+			md = MessageDigest.getInstance("MD5");
+		} catch (NoSuchAlgorithmException e) {
+			throw new RuntimeException(e);
+		}
+
+		byte[] digest;
+		digest = md.digest(Integer.toString(partition).getBytes(StandardCharsets.UTF_8));
+		BigInteger bigInt = new BigInteger(1, digest);
+		return bigInt.toString();
 	}
 
 	@Override
