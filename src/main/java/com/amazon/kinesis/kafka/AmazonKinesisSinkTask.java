@@ -1,6 +1,5 @@
 package com.amazon.kinesis.kafka;
 
-import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -18,6 +17,8 @@ import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.apache.kafka.connect.sink.SinkTaskContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.amazonaws.services.kinesis.producer.Attempt;
 import com.amazonaws.services.kinesis.producer.KinesisProducer;
@@ -30,6 +31,8 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 
 public class AmazonKinesisSinkTask extends SinkTask {
+
+	private static final Logger logger = LoggerFactory.getLogger(AmazonKinesisSinkTask.class);
 
 	private String streamName;
 
@@ -183,7 +186,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 								// notify/log that Kinesis Producers have
 								// buffered values
 								// but are not being sent
-								System.out.println(
+								logger.info(
 										"Kafka Consumption has been stopped because Kinesis Producers has buffered messages above threshold");
 								sleepCount = 0;
 							}
@@ -213,7 +216,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 							// notify/log that Kinesis Producers have buffered
 							// values
 							// but are not being sent
-							System.out.println(
+							logger.info(
 									"Kafka Consumption has been stopped because Kinesis Producers has buffered messages above threshold");
 							sleepCount = 0;
 						}
@@ -249,13 +252,13 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		// If configured use kafka partition key as explicit hash key
 		// This will be useful when sending data from same partition into
 		// same shard
-		System.out.println("Adding user record for stream: " + streamName + ", partitionKey: " + partitionKey
+		logger.info("Adding user record for stream: " + streamName + ", partitionKey: " + partitionKey
 				+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
 
 		if (usePartitionAsHashKey) {
 			String hashKey = hashKafkaPartition(sinkRecord.kafkaPartition());
 
-			System.out.println("Using partition as hash key for stream: " + streamName
+			logger.info("Using partition as hash key for stream: " + streamName
 					+ ", partitionKey: " + partitionKey
 					+ ", kafkaPartition: " + sinkRecord.kafkaPartition()
 					+ ", hashKey: " + hashKey);
@@ -263,7 +266,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 			return kp.addUserRecord(streamName, partitionKey, hashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		} else {
-				System.out.println("Not using partition as hash key for stream: " + streamName
+				logger.info("Not using partition as hash key for stream: " + streamName
 						+ ", partitionKey: " + partitionKey
 						+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
 
