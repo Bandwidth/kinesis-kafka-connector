@@ -252,13 +252,13 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		// If configured use kafka partition key as explicit hash key
 		// This will be useful when sending data from same partition into
 		// same shard
-		logger.info("Adding user record for stream: " + streamName + ", partitionKey: " + partitionKey
+		logger.debug("Adding user record for stream: " + streamName + ", partitionKey: " + partitionKey
 				+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
 
 		if (usePartitionAsHashKey) {
 			String hashKey = hashKafkaPartition(sinkRecord.kafkaPartition());
 
-			logger.info("Using partition as hash key for stream: " + streamName
+			logger.debug("Using partition as hash key for stream: " + streamName
 					+ ", partitionKey: " + partitionKey
 					+ ", kafkaPartition: " + sinkRecord.kafkaPartition()
 					+ ", hashKey: " + hashKey);
@@ -266,7 +266,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 			return kp.addUserRecord(streamName, partitionKey, hashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		} else {
-				logger.info("Not using partition as hash key for stream: " + streamName
+				logger.debug("Not using partition as hash key for stream: " + streamName
 						+ ", partitionKey: " + partitionKey
 						+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
 
