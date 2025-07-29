@@ -249,12 +249,27 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		// If configured use kafka partition key as explicit hash key
 		// This will be useful when sending data from same partition into
 		// same shard
-		if (usePartitionAsHashKey)
-			return kp.addUserRecord(streamName, partitionKey, hashKafkaPartition(sinkRecord.kafkaPartition()),
+		System.out.println("Adding user record for stream: " + streamName + ", partitionKey: " + partitionKey
+				+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
+
+		if (usePartitionAsHashKey) {
+			String hashKey = hashKafkaPartition(sinkRecord.kafkaPartition());
+
+			System.out.println("Using partition as hash key for stream: " + streamName
+					+ ", partitionKey: " + partitionKey
+					+ ", kafkaPartition: " + sinkRecord.kafkaPartition()
+					+ ", hashKey: " + hashKey);
+
+			return kp.addUserRecord(streamName, partitionKey, hashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-		else
-			return kp.addUserRecord(streamName, partitionKey,
-					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+		} else {
+				System.out.println("Not using partition as hash key for stream: " + streamName
+						+ ", partitionKey: " + partitionKey
+						+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
+
+				return kp.addUserRecord(streamName, partitionKey,
+						DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+			}
 
 	}
 
@@ -263,7 +278,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		try {
 			md = MessageDigest.getInstance("MD5");
 		} catch (NoSuchAlgorithmException e) {
-			throw new RuntimeException(e);
+			throw new RuntimeException("Failed to get MD5 algorithm", e);
 		}
 
 		byte[] digest;
