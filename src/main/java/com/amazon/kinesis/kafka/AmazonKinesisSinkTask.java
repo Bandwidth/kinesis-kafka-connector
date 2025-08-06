@@ -1,5 +1,9 @@
 package com.amazon.kinesis.kafka;
 
+import com.amazonaws.services.kinesis.AmazonKinesis;
+import com.amazonaws.services.kinesis.AmazonKinesisClientBuilder;
+import com.amazonaws.services.kinesis.model.DescribeStreamRequest;
+import com.amazonaws.services.kinesis.model.DescribeStreamResult;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -66,6 +70,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	private boolean usePartitionAsHashKey;
 
+	private boolean spreadAcrossAllShards;
+
 	private boolean flushSync;
 
 	private boolean singleKinesisProducerPerPartition;
@@ -85,6 +91,12 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	private KinesisProducer kinesisProducer;
 
 	private ConnectException putException;
+
+	private volatile Integer cachedShardCount = null;
+	private volatile long lastShardCountFetchTime = 0;
+	private static final long SHARD_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+	private final Map<Integer, Map<Integer, Integer>> partitionShardCounts = new HashMap<>();
 
 	final FutureCallback<UserRecordResult> callback = new FutureCallback<UserRecordResult>() {
 		@Override
@@ -117,6 +129,11 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	@Override
 	public void flush(Map<TopicPartition, OffsetAndMetadata> arg0) {
 		checkForEarlierPutException();
+
+		synchronized (partitionShardCounts) {
+			logger.info("Partition-to-shard counts: {}", partitionShardCounts);
+			partitionShardCounts.clear();
+		}
 
 		if (singleKinesisProducerPerPartition) {
 			producerMap.values().forEach(producer -> {
@@ -249,31 +266,48 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
 			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
 
-		// If configured use kafka partition key as explicit hash key
-		// This will be useful when sending data from same partition into
-		// same shard
-		logger.debug("Adding user record for stream: " + streamName + ", partitionKey: " + partitionKey
-				+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
+		logger.debug("Adding user record for stream: {}, partitionKey: {}, kafkaPartition: {}",
+				streamName, partitionKey, sinkRecord.kafkaPartition());
 
-		if (usePartitionAsHashKey) {
+		if (usePartitionAsHashKey && spreadAcrossAllShards) {
+			int kinesisShards = getKinesisShardsCount();
+			int kafkaPartition = sinkRecord.kafkaPartition();
+			long offset = sinkRecord.kafkaOffset();
+
+			// Takes the kafka partition, multiplies by a prime number to avoid collisions, and add a value that will be different for each record.
+			// Then take the modulus of all of that with the number of Kinesis shards to get a spread partition.
+			int spreadPartition = Math.floorMod((kafkaPartition * 31L + offset), kinesisShards);
+			String hashKey = hashKafkaPartition(spreadPartition);
+
+			logger.debug(
+					"Using spread partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, spreadPartition: {}, hashKey: {}",
+					streamName, partitionKey, sinkRecord.kafkaPartition(), spreadPartition, hashKey);
+
+			synchronized (partitionShardCounts) {
+				partitionShardCounts
+						.computeIfAbsent(kafkaPartition, k -> new HashMap<>())
+						.merge(spreadPartition, 1, Integer::sum);
+			}
+
+			return kp.addUserRecord(streamName, partitionKey, hashKey,
+					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+		} else if (usePartitionAsHashKey) {
 			String hashKey = hashKafkaPartition(sinkRecord.kafkaPartition());
 
-			logger.debug("Using partition as hash key for stream: " + streamName
-					+ ", partitionKey: " + partitionKey
-					+ ", kafkaPartition: " + sinkRecord.kafkaPartition()
-					+ ", hashKey: " + hashKey);
+			logger.debug(
+					"Using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, hashKey: {}",
+					streamName, partitionKey, sinkRecord.kafkaPartition(), hashKey);
 
 			return kp.addUserRecord(streamName, partitionKey, hashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		} else {
-				logger.debug("Not using partition as hash key for stream: " + streamName
-						+ ", partitionKey: " + partitionKey
-						+ ", kafkaPartition: " + sinkRecord.kafkaPartition());
+			logger.debug(
+					"Not using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}",
+					streamName, partitionKey, sinkRecord.kafkaPartition());
 
-				return kp.addUserRecord(streamName, partitionKey,
-						DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-			}
-
+			return kp.addUserRecord(streamName, partitionKey,
+					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+		}
 	}
 
 	public static String hashKafkaPartition(int partition) {
@@ -288,6 +322,45 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		digest = md.digest(Integer.toString(partition).getBytes(StandardCharsets.UTF_8));
 		BigInteger bigInt = new BigInteger(1, digest);
 		return bigInt.toString();
+	}
+
+	private int getKinesisShardsCount() {
+		long now = System.currentTimeMillis();
+		if (cachedShardCount == null || (now - lastShardCountFetchTime) > SHARD_COUNT_CACHE_TTL_MS) {
+			cachedShardCount = fetchKinesisShardsCount();
+			lastShardCountFetchTime = now;
+		}
+		return cachedShardCount;
+	}
+
+	private int fetchKinesisShardsCount() {
+		AmazonKinesis kinesisClient = AmazonKinesisClientBuilder.standard()
+				.withRegion(regionName)
+				.build();
+
+		DescribeStreamRequest request = new DescribeStreamRequest()
+				.withStreamName(streamName);
+
+		int shardCount = 0;
+		String exclusiveStartShardId = null;
+
+		do {
+			if (exclusiveStartShardId != null) {
+				request.setExclusiveStartShardId(exclusiveStartShardId);
+			}
+			DescribeStreamResult result = kinesisClient.describeStream(request);
+			shardCount += result.getStreamDescription().getShards().size();
+			if (result.getStreamDescription().getHasMoreShards()) {
+				exclusiveStartShardId = result.getStreamDescription().getShards()
+						.get(result.getStreamDescription().getShards().size() - 1)
+						.getShardId();
+			} else {
+				exclusiveStartShardId = null;
+			}
+		} while (exclusiveStartShardId != null);
+
+		kinesisClient.shutdown();
+		return shardCount;
 	}
 
 	@Override
@@ -324,6 +397,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		aggregation = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.AGGREGATION_ENABLED));
 
 		usePartitionAsHashKey = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.USE_PARTITION_AS_HASH_KEY));
+
+		spreadAcrossAllShards = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.SPREAD_ACROSS_ALL_SHARDS));
 
 		flushSync = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.FLUSH_SYNC));
 
