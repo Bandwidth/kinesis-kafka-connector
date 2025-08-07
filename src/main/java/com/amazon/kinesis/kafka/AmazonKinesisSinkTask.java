@@ -288,7 +288,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		logger.debug("Adding user record for stream: {}, partitionKey: {}, kafkaPartition: {}",
 				streamName, partitionKey, sinkRecord.kafkaPartition());
 
-		if (usePartitionAsHashKey && spreadAcrossAllShards) {
+		if (usePartitionAsHashKey) {
 			int kinesisShards = getKinesisShardsCount();
 			int kafkaPartitions = getKafkaPartitionCount();
 
@@ -320,15 +320,15 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 			return kp.addUserRecord(streamName, partitionKey, hashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-		} else if (usePartitionAsHashKey) {
-			String hashKey = hashKafkaPartition(Integer.toString(sinkRecord.kafkaPartition()));
-
-			logger.debug(
-					"Using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, hashKey: {}",
-					streamName, partitionKey, sinkRecord.kafkaPartition(), hashKey);
-
-			return kp.addUserRecord(streamName, partitionKey, hashKey,
-					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+//		} else if (usePartitionAsHashKey) {
+//			String hashKey = hashKafkaPartition(Integer.toString(sinkRecord.kafkaPartition()));
+//
+//			logger.debug(
+//					"Using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, hashKey: {}",
+//					streamName, partitionKey, sinkRecord.kafkaPartition(), hashKey);
+//
+//			return kp.addUserRecord(streamName, partitionKey, hashKey,
+//					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		} else {
 			logger.debug(
 					"Not using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}",
