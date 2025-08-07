@@ -176,7 +176,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 				partitionKey = Integer.toString(sinkRecord.kafkaPartition());
 			}
 
-			logger.debug("UsePartitionAsHashKey: {}, SpreadAcrossAllShards: {}", usePartitionAsHashKey, spreadAcrossAllShards);
+			logger.trace("UsePartitionAsHashKey: {}, SpreadAcrossAllShards: {}", usePartitionAsHashKey, spreadAcrossAllShards);
 
 			if (singleKinesisProducerPerPartition)
 				f = addUserRecord(producerMap.get(sinkRecord.kafkaPartition() + "@" + sinkRecord.topic()), streamName,
@@ -428,7 +428,10 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 		usePartitionAsHashKey = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.USE_PARTITION_AS_HASH_KEY));
 
-		spreadAcrossAllShards = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.SPREAD_ACROSS_ALL_SHARDS));
+		// I have no idea why it isn't recognizing when I set this as true.
+//		spreadAcrossAllShards = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.SPREAD_ACROSS_ALL_SHARDS));
+		spreadAcrossAllShards = true;
+
 
 		flushSync = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.FLUSH_SYNC));
 
