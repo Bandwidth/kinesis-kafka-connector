@@ -14,6 +14,7 @@ import java.util.Map;
 
 import com.amazonaws.util.StringUtils;
 import com.google.common.util.concurrent.MoreExecutors;
+import java.util.Random;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -97,6 +98,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	private static final long SHARD_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 	private final Map<Integer, Map<Integer, Integer>> partitionShardCounts = new HashMap<>();
+
+	private Random rand = new Random();
 
 	final FutureCallback<UserRecordResult> callback = new FutureCallback<UserRecordResult>() {
 		@Override
@@ -263,6 +266,13 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 	}
 
+	private int getKafkaPartitionCount() {
+		if (sinkTaskContext.assignment() == null || sinkTaskContext.assignment().isEmpty()) {
+			throw new ConnectException("No partitions assigned to this task");
+		}
+		return sinkTaskContext.assignment().size();
+	}
+
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
 			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
 
@@ -271,28 +281,25 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 		if (usePartitionAsHashKey && spreadAcrossAllShards) {
 			int kinesisShards = getKinesisShardsCount();
-			int kafkaPartition = sinkRecord.kafkaPartition();
-			long offset = sinkRecord.kafkaOffset();
+			int kafkaPartitions = getKafkaPartitionCount();
 
-			// Takes the kafka partition, multiplies by a prime number to avoid collisions, and add a value that will be different for each record.
-			// Then take the modulus of all of that with the number of Kinesis shards to get a spread partition.
-			int spreadPartition = Math.floorMod((kafkaPartition * 31L + offset), kinesisShards);
-			String hashKey = hashKafkaPartition(spreadPartition);
+			// Determine how many shards we should spread across.
+			int numShardsToSpreadAcross = (int) Math.ceil((double) kinesisShards / kafkaPartitions);
+
+			// Pick a random integer between 0 and numShardsToSpreadAcross - 1
+			int spreadShard = rand.nextInt(numShardsToSpreadAcross);
+
+			String keyToHash = sinkRecord.kafkaPartition() + "-" + spreadShard;
+			String hashKey = hashKafkaPartition(keyToHash);
 
 			logger.debug(
-					"Using spread partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, spreadPartition: {}, hashKey: {}",
-					streamName, partitionKey, sinkRecord.kafkaPartition(), spreadPartition, hashKey);
-
-			synchronized (partitionShardCounts) {
-				partitionShardCounts
-						.computeIfAbsent(kafkaPartition, k -> new HashMap<>())
-						.merge(spreadPartition, 1, Integer::sum);
-			}
+					"Using partition as hash key for stream: {}, kafkaPartition: {}, spreadShard: {}, keyToHash: {}, hashKey: {}",
+					streamName, sinkRecord.kafkaPartition(), spreadShard, keyToHash, hashKey);
 
 			return kp.addUserRecord(streamName, partitionKey, hashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		} else if (usePartitionAsHashKey) {
-			String hashKey = hashKafkaPartition(sinkRecord.kafkaPartition());
+			String hashKey = hashKafkaPartition(Integer.toString(sinkRecord.kafkaPartition()));
 
 			logger.debug(
 					"Using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, hashKey: {}",
@@ -310,7 +317,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 	}
 
-	public static String hashKafkaPartition(int partition) {
+	public static String hashKafkaPartition(String partition) {
 		MessageDigest md;
 		try {
 			md = MessageDigest.getInstance("MD5");
@@ -319,9 +326,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 
 		byte[] digest;
-		digest = md.digest(Integer.toString(partition).getBytes(StandardCharsets.UTF_8));
-		BigInteger bigInt = new BigInteger(1, digest);
-		return bigInt.toString();
+		digest = md.digest(partition.getBytes(StandardCharsets.UTF_8));
+		return new BigInteger(1, digest).toString();
 	}
 
 	private int getKinesisShardsCount() {
