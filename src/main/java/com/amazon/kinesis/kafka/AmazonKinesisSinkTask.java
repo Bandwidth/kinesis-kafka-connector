@@ -176,11 +176,13 @@ public class AmazonKinesisSinkTask extends SinkTask {
 				partitionKey = Integer.toString(sinkRecord.kafkaPartition());
 			}
 
+			logger.debug("UsePartitionAsHashKey: {}, SpreadAcrossAllShards: {}", usePartitionAsHashKey, spreadAcrossAllShards);
+
 			if (singleKinesisProducerPerPartition)
 				f = addUserRecord(producerMap.get(sinkRecord.kafkaPartition() + "@" + sinkRecord.topic()), streamName,
-						partitionKey, usePartitionAsHashKey, sinkRecord);
+						partitionKey, usePartitionAsHashKey, spreadAcrossAllShards, sinkRecord);
 			else
-				f = addUserRecord(kinesisProducer, streamName, partitionKey, usePartitionAsHashKey, sinkRecord);
+				f = addUserRecord(kinesisProducer, streamName, partitionKey, usePartitionAsHashKey, spreadAcrossAllShards, sinkRecord);
 
 			Futures.addCallback(f, callback, MoreExecutors.directExecutor());
 
@@ -281,7 +283,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	}
 
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
-			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
+			boolean usePartitionAsHashKey, boolean spreadAcrossAllShards, SinkRecord sinkRecord) {
 
 		logger.debug("Adding user record for stream: {}, partitionKey: {}, kafkaPartition: {}",
 				streamName, partitionKey, sinkRecord.kafkaPartition());
