@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -298,27 +299,19 @@ public class AmazonKinesisSinkTask extends SinkTask {
 			// Pick a random integer between 0 and numShardsToSpreadAcross - 1
 			int spreadShard = rand.nextInt(numShardsToSpreadAcross);
 
-			String keyToHash = sinkRecord.kafkaPartition() + "-" + spreadShard;
-			String hashKey = hashKafkaPartition(keyToHash);
+			String kinesisPartitionKey = sinkRecord.kafkaPartition() + "-" + spreadShard;
 
+			int shardIndex = selectShard(kinesisPartitionKey, kinesisShards);
 			List<Shard> shards = getKinesisShards();
-			String shardId = null;
-			for (Shard shard : shards) {
-				String lowerBound = shard.getHashKeyRange().getStartingHashKey();
-				String upperBound = shard.getHashKeyRange().getEndingHashKey();
+			Shard shard = shards.get(shardIndex);
 
-				if (hashKey.compareTo(lowerBound) >= 0 && hashKey.compareTo(upperBound) <= 0) {
-					recordEventToShard(sinkRecord.kafkaPartition(), shard.getShardId());
-					shardId = shard.getShardId();
-					break;
-				}
-			}
+			String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
 
 			logger.debug(
-					"Using partition as hash key for stream: {}, kafkaPartition: {}, shard:{}, spreadShard: {}, keyToHash: {}, hashKey: {}",
-					streamName, sinkRecord.kafkaPartition(), shardId, spreadShard, keyToHash, hashKey);
+					"Using partition as hash key for stream: {}, kafkaPartition: {}, shard:{}, spreadShard: {}, kinesis partition key: {}, explicit hash key: {}",
+					streamName, sinkRecord.kafkaPartition(), shard.getShardId(), spreadShard, kinesisPartitionKey, shardHashKey);
 
-			return kp.addUserRecord(streamName, partitionKey, hashKey,
+			return kp.addUserRecord(streamName, partitionKey, shardHashKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 //		} else if (usePartitionAsHashKey) {
 //			String hashKey = hashKafkaPartition(Integer.toString(sinkRecord.kafkaPartition()));
@@ -339,7 +332,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 	}
 
-	public static String hashKafkaPartition(String partition) {
+	public static int selectShard(String partitionKey, int numShards) {
 		MessageDigest md;
 		try {
 			md = MessageDigest.getInstance("MD5");
@@ -348,8 +341,18 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 
 		byte[] digest;
-		digest = md.digest(partition.getBytes(StandardCharsets.UTF_8));
-		return new BigInteger(1, digest).toString();
+		digest = md.digest(partitionKey.getBytes(StandardCharsets.UTF_8));
+
+		BigInteger hash = new BigInteger(1, digest);
+		BigInteger maxHash = BigInteger.valueOf(2).pow(128);
+		BigInteger shardRange = maxHash.divide(BigInteger.valueOf(numShards));
+		BigInteger shardId = hash.divide(shardRange);
+		int shardIndex = shardId.intValue();
+		if (shardIndex < 0 || shardIndex >= numShards) {
+			throw new IllegalArgumentException("Shard index out of bounds: " + shardIndex + " for numShards: " + numShards);
+		}
+
+		return shardIndex;
 	}
 
 	private int getKinesisShardsCount() {
@@ -388,7 +391,10 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 			} while (exclusiveStartShardId != null);
 			kinesisClient.shutdown();
-			kinesisShardsCache = shards;
+			// sorted shards by shardId to ensure consistent ordering
+			List<Shard> sortedShards = new ArrayList<>(shards);
+			sortedShards.sort(Comparator.comparing(Shard::getShardId));
+			kinesisShardsCache = sortedShards;
 		}
 		return kinesisShardsCache;
 	}
