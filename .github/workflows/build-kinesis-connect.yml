@@ -1,0 +1,75 @@
+name: Build Kinesis Connect Image
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  build:
+    name: Build Kinesis Connect Image
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ${{ fromJSON(vars.SWI_GLORG_LAB_UBUNTU_2204) }}
+    outputs:
+      artifactory-image: ${{ steps.artifactory-push.outputs.artifactory-image }}
+      tag: ${{ steps.build.outputs.tag }}
+
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v4
+
+      - name: Get Artifactory Access Token
+        uses: Bandwidth/vault-provider-action@v1
+        with:
+          artifactory-access-token-type: "dev-writers"
+          identity-source: repo
+          durable-team-name: BAND Billing
+
+      - name: Get Artifactory Access Token
+        uses: Bandwidth/vault-provider-action@v1
+        with:
+          export-github-pat: true
+
+      - name: Generate tag
+        id: tag
+        shell: bash
+        run: |
+          rand=$(date +%N | cut -c1-3)
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            tag="7.5.0-kinesis-$(date +%Y%m%d)-$rand"
+          else
+            tag="7.5.0-kinesis-$(git rev-parse --short HEAD)-$rand"
+          fi
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+          echo "Generated tag: $tag"
+      - name: Build Kinesis Connect Image
+        id: build
+        shell: bash
+        run: |
+          image="kinesis-connect:${{ steps.tag.outputs.tag }}"
+          docker build \
+            --build-arg GITHUB_TOKEN=${{ env.GITHUB_ORG_READER_TOKEN }} \
+            -f operations/Dockerfile -t $image .
+          echo "image=$image" >> $GITHUB_OUTPUT
+          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_OUTPUT
+          echo "Built image: $image"
+      - name: Log in to Artifactory
+        uses: docker/login-action@v3
+        with:
+          registry: bandwidth-docker.jfrog.io
+          username: ${{ env.ARTIFACTORY_ACCESS_TOKEN_USERNAME }}
+          password: ${{ env.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: Push Image to Artifactory
+        shell: bash
+        id: artifactory-push
+        run: |
+          image="bandwidth-docker.jfrog.io/kafka-connect/kinesis-connect:${{ steps.build.outputs.tag }}"
+          echo "artifactory-image=$image" >> $GITHUB_OUTPUT
+          echo "Pushing to: $image"
+          docker tag ${{ steps.build.outputs.image }} $image
+          docker push $image
