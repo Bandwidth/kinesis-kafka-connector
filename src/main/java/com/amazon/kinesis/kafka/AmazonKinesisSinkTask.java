@@ -75,8 +75,6 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	private boolean usePartitionAsHashKey;
 
-	private boolean spreadAcrossAllShards;
-
 	private boolean flushSync;
 
 	private boolean singleKinesisProducerPerPartition;
@@ -177,13 +175,11 @@ public class AmazonKinesisSinkTask extends SinkTask {
 				partitionKey = Integer.toString(sinkRecord.kafkaPartition());
 			}
 
-			logger.trace("UsePartitionAsHashKey: {}, SpreadAcrossAllShards: {}", usePartitionAsHashKey, spreadAcrossAllShards);
-
 			if (singleKinesisProducerPerPartition)
 				f = addUserRecord(producerMap.get(sinkRecord.kafkaPartition() + "@" + sinkRecord.topic()), streamName,
-						partitionKey, usePartitionAsHashKey, spreadAcrossAllShards, sinkRecord);
+						partitionKey, usePartitionAsHashKey, sinkRecord);
 			else
-				f = addUserRecord(kinesisProducer, streamName, partitionKey, usePartitionAsHashKey, spreadAcrossAllShards, sinkRecord);
+				f = addUserRecord(kinesisProducer, streamName, partitionKey, usePartitionAsHashKey, sinkRecord);
 
 			Futures.addCallback(f, callback, MoreExecutors.directExecutor());
 
@@ -284,45 +280,12 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	}
 
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
-			boolean usePartitionAsHashKey, boolean spreadAcrossAllShards, SinkRecord sinkRecord) {
+			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
 
 		logger.debug("Adding user record for stream: {}, partitionKey: {}, kafkaPartition: {}",
 				streamName, partitionKey, sinkRecord.kafkaPartition());
 
-		if (usePartitionAsHashKey) {
-			int kinesisShards = getKinesisShardsCount();
-			int kafkaPartitions = getKafkaPartitionCount();
-
-			// Determine how many shards we should spread across.
-			int numShardsToSpreadAcross = (int) Math.ceil((double) kinesisShards / kafkaPartitions);
-
-			// Pick a random integer between 0 and numShardsToSpreadAcross - 1
-			int spreadShard = rand.nextInt(numShardsToSpreadAcross);
-
-			String kinesisPartitionKey = sinkRecord.kafkaPartition() + "-" + spreadShard;
-
-			int shardIndex = selectShard(kinesisPartitionKey, kinesisShards);
-			List<Shard> shards = getKinesisShards();
-			Shard shard = shards.get(shardIndex);
-
-			String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
-
-			logger.debug(
-					"Using partition as hash key for stream: {}, kafkaPartition: {}, shard:{}, spreadShard: {}, kinesis partition key: {}, explicit hash key: {}",
-					streamName, sinkRecord.kafkaPartition(), shard.getShardId(), spreadShard, kinesisPartitionKey, shardHashKey);
-
-			return kp.addUserRecord(streamName, partitionKey, shardHashKey,
-					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-//		} else if (usePartitionAsHashKey) {
-//			String hashKey = hashKafkaPartition(Integer.toString(sinkRecord.kafkaPartition()));
-//
-//			logger.debug(
-//					"Using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}, hashKey: {}",
-//					streamName, partitionKey, sinkRecord.kafkaPartition(), hashKey);
-//
-//			return kp.addUserRecord(streamName, partitionKey, hashKey,
-//					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-		} else {
+		if (!usePartitionAsHashKey) {
 			logger.debug(
 					"Not using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}",
 					streamName, partitionKey, sinkRecord.kafkaPartition());
@@ -330,8 +293,46 @@ public class AmazonKinesisSinkTask extends SinkTask {
 			return kp.addUserRecord(streamName, partitionKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		}
+
+		// We are using partition as hash key
+		int kinesisShards = getKinesisShardsCount();
+		int kafkaPartitions = getKafkaPartitionCount();
+
+		int shardIndex = selectShardWithSpread(partitionKey, kinesisShards, kafkaPartitions);
+
+		List<Shard> shards = getKinesisShards();
+		Shard shard = shards.get(shardIndex);
+
+		String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
+
+		return kp.addUserRecord(streamName, partitionKey, shardHashKey,
+				DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 	}
 
+	/**
+	 * Handles spreading the partition key across multiple shards if there are more shards than
+	 * Kafka partitions. This helps to avoid hot-sharding when there are few Kafka partitions.
+	 * If there are fewer shards than Kafka partitions, only one shard will be used per Kafka partition.
+	 */
+	private int selectShardWithSpread(String partitionKey, int numShards, int numKafkaPartitions) {
+		// Determine how many shards we should spread across.
+		int numShardsToSpreadAcross = (int) Math.ceil((double) numShards / numKafkaPartitions);
+
+		// Pick a random integer between 0 and numShardsToSpreadAcross - 1
+		int spreadShard = rand.nextInt(numShardsToSpreadAcross);
+
+		String spreadPartitionKey = partitionKey + "-" + spreadShard;
+
+		logger.debug("Spreading partition key {} across {} shards, using spread partition key {}. (Total shards: {} and kafka partitions: {})",
+				partitionKey, numShardsToSpreadAcross, spreadPartitionKey, numShards, numKafkaPartitions);
+
+		return selectShard(spreadPartitionKey, numShards);
+	}
+
+	/**
+	 * Selects a shard index based on the provided partition key and number of shards.
+	 * It uses MD5 hashing to ensure an even distribution across shards.
+	 */
 	public static int selectShard(String partitionKey, int numShards) {
 		MessageDigest md;
 		try {
@@ -343,10 +344,15 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		byte[] digest;
 		digest = md.digest(partitionKey.getBytes(StandardCharsets.UTF_8));
 
-		BigInteger hash = new BigInteger(1, digest);
+		// Create a hash of the partition key
+		BigInteger hashedPartitionKey = new BigInteger(1, digest);
+
+		// Calculate how much of the hash space each shard covers
 		BigInteger maxHash = BigInteger.valueOf(2).pow(128);
-		BigInteger shardRange = maxHash.divide(BigInteger.valueOf(numShards));
-		BigInteger shardId = hash.divide(shardRange);
+		BigInteger hashSpacePerShard = maxHash.divide(BigInteger.valueOf(numShards));
+
+		// Find where in our hash space the hashed partition key lands
+		BigInteger shardId = hashedPartitionKey.divide(hashSpacePerShard);
 		int shardIndex = shardId.intValue();
 		if (shardIndex < 0 || shardIndex >= numShards) {
 			throw new IllegalArgumentException("Shard index out of bounds: " + shardIndex + " for numShards: " + numShards);
@@ -433,11 +439,6 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		aggregation = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.AGGREGATION_ENABLED));
 
 		usePartitionAsHashKey = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.USE_PARTITION_AS_HASH_KEY));
-
-		// I have no idea why it isn't recognizing when I set this as true.
-//		spreadAcrossAllShards = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.SPREAD_ACROSS_ALL_SHARDS));
-		spreadAcrossAllShards = true;
-
 
 		flushSync = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.FLUSH_SYNC));
 

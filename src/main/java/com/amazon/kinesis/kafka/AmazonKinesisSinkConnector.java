@@ -34,8 +34,6 @@ public class AmazonKinesisSinkConnector extends SinkConnector {
 
 	public static final String USE_PARTITION_AS_HASH_KEY = "usePartitionAsHashKey";
 
-	public static final String SPREAD_ACROSS_ALL_SHARDS = "spreadAcrossAllShards";
-	
 	public static final String FLUSH_SYNC = "flushSync";
 	
 	public static final String SINGLE_KINESIS_PRODUCER_PER_PARTITION = "singleKinesisProducerPerPartition";
