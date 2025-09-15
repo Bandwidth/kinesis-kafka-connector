@@ -98,8 +98,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	private volatile Integer cachedShardCount = null;
 	private volatile long lastShardCountFetchTime = 0;
 	private static final long SHARD_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-	private final Map<Integer, Map<String, Long>> partitionShardEventCounts = new HashMap<>();
+	private static final BigInteger maxHash = BigInteger.valueOf(2).pow(128);
 
 	private Random rand = new Random();
 
@@ -134,9 +133,6 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	@Override
 	public void flush(Map<TopicPartition, OffsetAndMetadata> arg0) {
 		checkForEarlierPutException();
-
-		logger.debug("Kafka partition to Kinesis shard event counts: {}", partitionShardEventCounts);
-		partitionShardEventCounts.clear();
 
 		if (singleKinesisProducerPerPartition) {
 			producerMap.values().forEach(producer -> {
@@ -266,12 +262,6 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 	}
 
-	private void recordEventToShard(int kafkaPartition, String shardId) {
-		partitionShardEventCounts
-				.computeIfAbsent(kafkaPartition, k -> new HashMap<>())
-				.merge(shardId, 1L, Long::sum);
-	}
-
 	private int getKafkaPartitionCount() {
 		if (sinkTaskContext.assignment() == null || sinkTaskContext.assignment().isEmpty()) {
 			throw new ConnectException("No partitions assigned to this task");
@@ -336,6 +326,11 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	public static int selectShard(String partitionKey, int numShards) {
 		MessageDigest md;
 		try {
+			// Unfortunately, it isn't thread-safe. And because we can't guarantee how this
+			//  SinkTask is called, we are unsure of if there is one made per thread
+			//  Here's a stackoverflow answer that explains that this isn't thread-safe and that it
+			//  isn't a huge deal to .getInstance like is done here:
+			//  https://stackoverflow.com/questions/17554998/need-thread-safe-messagedigest-in-java
 			md = MessageDigest.getInstance("MD5");
 		} catch (NoSuchAlgorithmException e) {
 			throw new RuntimeException("Failed to get MD5 algorithm", e);
@@ -348,8 +343,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		BigInteger hashedPartitionKey = new BigInteger(1, digest);
 
 		// Calculate how much of the hash space each shard covers
-		BigInteger maxHash = BigInteger.valueOf(2).pow(128);
-		BigInteger hashSpacePerShard = maxHash.divide(BigInteger.valueOf(numShards));
+		BigInteger hashSpacePerShard = maxHash.divide(java.math.BigInteger.valueOf(numShards));
 
 		// Find where in our hash space the hashed partition key lands
 		BigInteger shardId = hashedPartitionKey.divide(hashSpacePerShard);
