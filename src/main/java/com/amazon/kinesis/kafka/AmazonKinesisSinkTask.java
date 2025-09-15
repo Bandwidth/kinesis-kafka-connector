@@ -19,6 +19,9 @@ import java.util.Map;
 import com.amazonaws.util.StringUtils;
 import com.google.common.util.concurrent.MoreExecutors;
 import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -75,6 +78,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	private boolean usePartitionAsHashKey;
 
+	private int totalKafkaPartitions;
+
 	private boolean flushSync;
 
 	private boolean singleKinesisProducerPerPartition;
@@ -95,12 +100,23 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	private ConnectException putException;
 
-	private volatile Integer cachedShardCount = null;
-	private volatile long lastShardCountFetchTime = 0;
-	private static final long SHARD_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 	private static final BigInteger maxHash = BigInteger.valueOf(2).pow(128);
 
-	private Random rand = new Random();
+	private List<Shard> kinesisShardsCache = null;
+	private final Object kinesisShardsCacheLock = new Object();
+	private ScheduledExecutorService shardCacheRefresher;
+	private static final long SHARD_CACHE_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+	private final Random rand = new Random();
+	private final MessageDigest md5 = getMD5();
+
+	private static MessageDigest getMD5() {
+		try {
+			return MessageDigest.getInstance("MD5");
+		} catch (NoSuchAlgorithmException e) {
+			throw new RuntimeException("Failed to get MD5 algorithm", e);
+		}
+	}
 
 	final FutureCallback<UserRecordResult> callback = new FutureCallback<UserRecordResult>() {
 		@Override
@@ -123,6 +139,20 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	@Override
 	public void initialize(SinkTaskContext context) {
 		sinkTaskContext = context;
+
+		// Start scheduled cache refresh
+		shardCacheRefresher = Executors.newSingleThreadScheduledExecutor();
+		shardCacheRefresher.scheduleAtFixedRate(() -> {
+			try {
+				List<Shard> shards = getKinesisShards();
+				synchronized (kinesisShardsCacheLock) {
+					kinesisShardsCache = shards;
+				}
+				logger.info("Kinesis shard cache refreshed, {} shards loaded.", shards.size());
+			} catch (Exception e) {
+				logger.error("Error refreshing Kinesis shard cache", e);
+			}
+		}, 0, SHARD_CACHE_REFRESH_INTERVAL_MS, TimeUnit.MILLISECONDS);
 	}
 
 	@Override
@@ -262,12 +292,17 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 	}
 
-	private int getKafkaPartitionCount() {
-		if (sinkTaskContext.assignment() == null || sinkTaskContext.assignment().isEmpty()) {
-			throw new ConnectException("No partitions assigned to this task");
+	private List<Shard> getCachedKinesisShards() {
+		if (kinesisShardsCache != null) {
+			return kinesisShardsCache;
 		}
-		return sinkTaskContext.assignment().size();
+
+		synchronized (kinesisShardsCacheLock) {
+			kinesisShardsCache = getKinesisShards();
+		}
+		return kinesisShardsCache;
 	}
+
 
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
 			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
@@ -284,17 +319,16 @@ public class AmazonKinesisSinkTask extends SinkTask {
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 		}
 
-		// We are using partition as hash key
-		int kinesisShards = getKinesisShardsCount();
-		int kafkaPartitions = getKafkaPartitionCount();
+		List<Shard> shards = getCachedKinesisShards();
 
-		int shardIndex = selectShardWithSpread(partitionKey, kinesisShards, kafkaPartitions);
-
-		List<Shard> shards = getKinesisShards();
+		// determine which shard to send to
+		int shardIndex = selectShardWithSpread(partitionKey, shards.size(), totalKafkaPartitions);
 		Shard shard = shards.get(shardIndex);
 
+		// get a hash that will send to that shard
 		String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
 
+		// send it
 		return kp.addUserRecord(streamName, partitionKey, shardHashKey,
 				DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 	}
@@ -323,21 +357,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	 * Selects a shard index based on the provided partition key and number of shards.
 	 * It uses MD5 hashing to ensure an even distribution across shards.
 	 */
-	public static int selectShard(String partitionKey, int numShards) {
-		MessageDigest md;
-		try {
-			// Unfortunately, it isn't thread-safe. And because we can't guarantee how this
-			//  SinkTask is called, we are unsure of if there is one made per thread
-			//  Here's a stackoverflow answer that explains that this isn't thread-safe and that it
-			//  isn't a huge deal to .getInstance like is done here:
-			//  https://stackoverflow.com/questions/17554998/need-thread-safe-messagedigest-in-java
-			md = MessageDigest.getInstance("MD5");
-		} catch (NoSuchAlgorithmException e) {
-			throw new RuntimeException("Failed to get MD5 algorithm", e);
-		}
-
-		byte[] digest;
-		digest = md.digest(partitionKey.getBytes(StandardCharsets.UTF_8));
+	private int selectShard(String partitionKey, int numShards) {
+		byte[] digest = md5.digest(partitionKey.getBytes(StandardCharsets.UTF_8));
 
 		// Create a hash of the partition key
 		BigInteger hashedPartitionKey = new BigInteger(1, digest);
@@ -355,48 +376,35 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		return shardIndex;
 	}
 
-	private int getKinesisShardsCount() {
-		long now = System.currentTimeMillis();
-		if (cachedShardCount == null || (now - lastShardCountFetchTime) > SHARD_COUNT_CACHE_TTL_MS) {
-			cachedShardCount = getKinesisShards().size();
-			lastShardCountFetchTime = now;
-		}
-		return cachedShardCount;
-	}
-
-	private List<Shard> kinesisShardsCache = null;
-
 	private List<Shard> getKinesisShards() {
-		if (kinesisShardsCache == null) {
-			AmazonKinesis kinesisClient = AmazonKinesisClientBuilder.standard()
-					.withRegion(regionName)
-					.build();
-			List<Shard> shards = new ArrayList<>();
-			String exclusiveStartShardId = null;
-			do {
-				DescribeStreamRequest request = new DescribeStreamRequest()
-						.withStreamName(streamName);
-				if (exclusiveStartShardId != null) {
-					request.setExclusiveStartShardId(exclusiveStartShardId);
-				}
-				DescribeStreamResult result = kinesisClient.describeStream(request);
-				shards.addAll(result.getStreamDescription().getShards());
-				if (result.getStreamDescription().getHasMoreShards()) {
-					exclusiveStartShardId = result.getStreamDescription().getShards()
-							.get(result.getStreamDescription().getShards().size() - 1)
-							.getShardId();
-				} else {
-					exclusiveStartShardId = null;
-				}
+		AmazonKinesis kinesisClient = AmazonKinesisClientBuilder.standard()
+				.withRegion(regionName)
+				.build();
+		List<Shard> shards = new ArrayList<>();
+		String exclusiveStartShardId = null;
+		do {
+			DescribeStreamRequest request = new DescribeStreamRequest()
+					.withStreamName(streamName);
+			if (exclusiveStartShardId != null) {
+				request.setExclusiveStartShardId(exclusiveStartShardId);
+			}
+			DescribeStreamResult result = kinesisClient.describeStream(request);
+			shards.addAll(result.getStreamDescription().getShards());
+			if (result.getStreamDescription().getHasMoreShards()) {
+				exclusiveStartShardId = result.getStreamDescription().getShards()
+						.get(result.getStreamDescription().getShards().size() - 1)
+						.getShardId();
+			} else {
+				exclusiveStartShardId = null;
+			}
 
-			} while (exclusiveStartShardId != null);
-			kinesisClient.shutdown();
-			// sorted shards by shardId to ensure consistent ordering
-			List<Shard> sortedShards = new ArrayList<>(shards);
-			sortedShards.sort(Comparator.comparing(Shard::getShardId));
-			kinesisShardsCache = sortedShards;
-		}
-		return kinesisShardsCache;
+		} while (exclusiveStartShardId != null);
+		kinesisClient.shutdown();
+		// sorted shards by shardId to ensure consistent ordering
+		List<Shard> sortedShards = new ArrayList<>(shards);
+		sortedShards.sort(Comparator.comparing(Shard::getShardId));
+
+		return sortedShards;
 	}
 
 	@Override
@@ -433,6 +441,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		aggregation = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.AGGREGATION_ENABLED));
 
 		usePartitionAsHashKey = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.USE_PARTITION_AS_HASH_KEY));
+
+		totalKafkaPartitions = Integer.parseInt(props.get(AmazonKinesisSinkConnector.TOTAL_KAFKA_PARTITIONS));
 
 		flushSync = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.FLUSH_SYNC));
 
@@ -474,6 +484,9 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	@Override
 	public void stop() {
+		if (shardCacheRefresher != null) {
+			shardCacheRefresher.shutdownNow();
+		}
 		// destroying kinesis producers which were not closed as part of close
 		if (singleKinesisProducerPerPartition) {
 			for (KinesisProducer kp : producerMap.values()) {

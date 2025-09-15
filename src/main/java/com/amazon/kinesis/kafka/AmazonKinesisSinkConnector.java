@@ -34,6 +34,8 @@ public class AmazonKinesisSinkConnector extends SinkConnector {
 
 	public static final String USE_PARTITION_AS_HASH_KEY = "usePartitionAsHashKey";
 
+	public static final String TOTAL_KAFKA_PARTITIONS = "totalKafkaPartitions";
+
 	public static final String FLUSH_SYNC = "flushSync";
 	
 	public static final String SINGLE_KINESIS_PRODUCER_PER_PARTITION = "singleKinesisProducerPerPartition";
@@ -87,6 +89,8 @@ public class AmazonKinesisSinkConnector extends SinkConnector {
 	private String aggregation;
 
 	private String usePartitionAsHashKey;
+
+	private String totalKafkaPartitions;
 	
 	private String flushSync;
 	
@@ -118,6 +122,7 @@ public class AmazonKinesisSinkConnector extends SinkConnector {
 		metricsNameSpace = props.get(METRICS_NAMESPACE);
 		aggregation = props.get(AGGREGATION_ENABLED);
 		usePartitionAsHashKey = props.get(USE_PARTITION_AS_HASH_KEY);
+		totalKafkaPartitions = props.get(TOTAL_KAFKA_PARTITIONS);
 		flushSync = props.get(FLUSH_SYNC);
 		singleKinesisProducerPerPartition = props.get(SINGLE_KINESIS_PRODUCER_PER_PARTITION);
 		pauseConsumption = props.get(PAUSE_CONSUMPTION);
@@ -210,6 +215,11 @@ public class AmazonKinesisSinkConnector extends SinkConnector {
 				config.put(USE_PARTITION_AS_HASH_KEY, usePartitionAsHashKey);
 			else
 				config.put(USE_PARTITION_AS_HASH_KEY, "false");
+
+			if (totalKafkaPartitions != null)
+				config.put(TOTAL_KAFKA_PARTITIONS, totalKafkaPartitions);
+			else
+				config.put(TOTAL_KAFKA_PARTITIONS, "20");
 			
 			if(flushSync != null)
 				config.put(FLUSH_SYNC, flushSync);
