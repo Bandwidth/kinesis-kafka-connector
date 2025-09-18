@@ -100,7 +100,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	private ConnectException putException;
 
-	private static final BigInteger maxHash = BigInteger.valueOf(2).pow(128);
+	private static final BigInteger MAX_HASH = BigInteger.valueOf(2).pow(128);
 
 	private List<Shard> kinesisShardsCache = null;
 	private final Object kinesisShardsCacheLock = new Object();
@@ -364,7 +364,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		BigInteger hashedPartitionKey = new BigInteger(1, digest);
 
 		// Calculate how much of the hash space each shard covers
-		BigInteger hashSpacePerShard = maxHash.divide(java.math.BigInteger.valueOf(numShards));
+		BigInteger hashSpacePerShard = MAX_HASH.divide(java.math.BigInteger.valueOf(numShards));
 
 		// Find where in our hash space the hashed partition key lands
 		BigInteger shardId = hashedPartitionKey.divide(hashSpacePerShard);
