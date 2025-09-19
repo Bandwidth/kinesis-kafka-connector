@@ -84,6 +84,7 @@ You can build the project by running "maven package" and it will build amazon-ki
 | roleExternalID | IAM Role external-id (optional)| - |
 | roleDurationSeconds | Duration of STS assumeRole session (optional)| - |
 | usePartitionAsHashKey | Using Kafka partition key as hash key for Kinesis streams.  | false |
+| totalKafkaPartitions | Total number of kafka partitions that we are reading from | 20 |
 | maxBufferedTime | Maximum amount of time (milliseconds) a record may spend being buffered before it gets sent. Records may be sent sooner than this depending on the other buffering limits. Range: [100..... 9223372036854775807] | 15000 |
 | maxConnections | Maximum number of connections to open to the backend. HTTP requests are sent in parallel over multiple connections. Range: [1...256]. | 24 |
 | rateLimit | Limits the maximum allowed put rate for a shard, as a percentage of the backend limits. | 100 |

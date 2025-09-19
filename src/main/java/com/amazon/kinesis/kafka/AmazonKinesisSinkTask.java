@@ -1,11 +1,27 @@
 package com.amazon.kinesis.kafka;
 
+import com.amazonaws.services.kinesis.AmazonKinesis;
+import com.amazonaws.services.kinesis.AmazonKinesisClientBuilder;
+import com.amazonaws.services.kinesis.model.DescribeStreamRequest;
+import com.amazonaws.services.kinesis.model.DescribeStreamResult;
+import com.amazonaws.services.kinesis.model.Shard;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import com.amazonaws.util.StringUtils;
 import com.google.common.util.concurrent.MoreExecutors;
+import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -13,6 +29,8 @@ import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.apache.kafka.connect.sink.SinkTaskContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.amazonaws.services.kinesis.producer.Attempt;
 import com.amazonaws.services.kinesis.producer.KinesisProducer;
@@ -25,6 +43,8 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 
 public class AmazonKinesisSinkTask extends SinkTask {
+
+	private static final Logger logger = LoggerFactory.getLogger(AmazonKinesisSinkTask.class);
 
 	private String streamName;
 
@@ -58,6 +78,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	private boolean usePartitionAsHashKey;
 
+	private int totalKafkaPartitions;
+
 	private boolean flushSync;
 
 	private boolean singleKinesisProducerPerPartition;
@@ -77,6 +99,24 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	private KinesisProducer kinesisProducer;
 
 	private ConnectException putException;
+
+	private static final BigInteger MAX_HASH = BigInteger.valueOf(2).pow(128);
+
+	private List<Shard> kinesisShardsCache = null;
+	private final Object kinesisShardsCacheLock = new Object();
+	private ScheduledExecutorService shardCacheRefresher;
+	private static final long SHARD_CACHE_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+	private final Random rand = new Random();
+	private final MessageDigest md5 = getMD5();
+
+	private static MessageDigest getMD5() {
+		try {
+			return MessageDigest.getInstance("MD5");
+		} catch (NoSuchAlgorithmException e) {
+			throw new RuntimeException("Failed to get MD5 algorithm", e);
+		}
+	}
 
 	final FutureCallback<UserRecordResult> callback = new FutureCallback<UserRecordResult>() {
 		@Override
@@ -99,6 +139,20 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	@Override
 	public void initialize(SinkTaskContext context) {
 		sinkTaskContext = context;
+
+		// Start scheduled cache refresh
+		shardCacheRefresher = Executors.newSingleThreadScheduledExecutor();
+		shardCacheRefresher.scheduleAtFixedRate(() -> {
+			try {
+				List<Shard> shards = getKinesisShards();
+				synchronized (kinesisShardsCacheLock) {
+					kinesisShardsCache = shards;
+				}
+				logger.info("Kinesis shard cache refreshed, {} shards loaded.", shards.size());
+			} catch (Exception e) {
+				logger.error("Error refreshing Kinesis shard cache", e);
+			}
+		}, 0, SHARD_CACHE_REFRESH_INTERVAL_MS, TimeUnit.MILLISECONDS);
 	}
 
 	@Override
@@ -178,7 +232,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 								// notify/log that Kinesis Producers have
 								// buffered values
 								// but are not being sent
-								System.out.println(
+								logger.info(
 										"Kafka Consumption has been stopped because Kinesis Producers has buffered messages above threshold");
 								sleepCount = 0;
 							}
@@ -208,7 +262,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 							// notify/log that Kinesis Producers have buffered
 							// values
 							// but are not being sent
-							System.out.println(
+							logger.info(
 									"Kafka Consumption has been stopped because Kinesis Producers has buffered messages above threshold");
 							sleepCount = 0;
 						}
@@ -238,19 +292,119 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		}
 	}
 
+	private List<Shard> getCachedKinesisShards() {
+		if (kinesisShardsCache != null) {
+			return kinesisShardsCache;
+		}
+
+		synchronized (kinesisShardsCacheLock) {
+			kinesisShardsCache = getKinesisShards();
+		}
+		return kinesisShardsCache;
+	}
+
+
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
 			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
 
-		// If configured use kafka partition key as explicit hash key
-		// This will be useful when sending data from same partition into
-		// same shard
-		if (usePartitionAsHashKey)
-			return kp.addUserRecord(streamName, partitionKey, Integer.toString(sinkRecord.kafkaPartition()),
-					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-		else
+		logger.debug("Adding user record for stream: {}, partitionKey: {}, kafkaPartition: {}",
+				streamName, partitionKey, sinkRecord.kafkaPartition());
+
+		if (!usePartitionAsHashKey) {
+			logger.debug(
+					"Not using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}",
+					streamName, partitionKey, sinkRecord.kafkaPartition());
+
 			return kp.addUserRecord(streamName, partitionKey,
 					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+		}
 
+		List<Shard> shards = getCachedKinesisShards();
+
+		// determine which shard to send to
+		int shardIndex = selectShardWithSpread(partitionKey, shards.size(), totalKafkaPartitions);
+		Shard shard = shards.get(shardIndex);
+
+		// get a hash that will send to that shard
+		String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
+
+		// send it
+		return kp.addUserRecord(streamName, partitionKey, shardHashKey,
+				DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+	}
+
+	/**
+	 * Handles spreading the partition key across multiple shards if there are more shards than
+	 * Kafka partitions. This helps to avoid hot-sharding when there are few Kafka partitions.
+	 * If there are fewer shards than Kafka partitions, only one shard will be used per Kafka partition.
+	 */
+	private int selectShardWithSpread(String partitionKey, int numShards, int numKafkaPartitions) {
+		// Determine how many shards we should spread across.
+		int numShardsToSpreadAcross = (int) Math.ceil((double) numShards / numKafkaPartitions);
+
+		// Pick a random integer between 0 and numShardsToSpreadAcross - 1
+		int spreadShard = rand.nextInt(numShardsToSpreadAcross);
+
+		String spreadPartitionKey = partitionKey + "-" + spreadShard;
+
+		logger.debug("Spreading partition key {} across {} shards, using spread partition key {}. (Total shards: {} and kafka partitions: {})",
+				partitionKey, numShardsToSpreadAcross, spreadPartitionKey, numShards, numKafkaPartitions);
+
+		return selectShard(spreadPartitionKey, numShards);
+	}
+
+	/**
+	 * Selects a shard index based on the provided partition key and number of shards.
+	 * It uses MD5 hashing to ensure an even distribution across shards.
+	 */
+	private int selectShard(String partitionKey, int numShards) {
+		byte[] digest = md5.digest(partitionKey.getBytes(StandardCharsets.UTF_8));
+
+		// Create a hash of the partition key
+		BigInteger hashedPartitionKey = new BigInteger(1, digest);
+
+		// Calculate how much of the hash space each shard covers
+		BigInteger hashSpacePerShard = MAX_HASH.divide(java.math.BigInteger.valueOf(numShards));
+
+		// Find where in our hash space the hashed partition key lands
+		BigInteger shardId = hashedPartitionKey.divide(hashSpacePerShard);
+		int shardIndex = shardId.intValue();
+		if (shardIndex < 0 || shardIndex >= numShards) {
+			throw new IllegalArgumentException("Shard index out of bounds: " + shardIndex + " for numShards: " + numShards);
+		}
+
+		return shardIndex;
+	}
+
+	private List<Shard> getKinesisShards() {
+		AmazonKinesis kinesisClient = AmazonKinesisClientBuilder.standard()
+				.withRegion(regionName)
+				.build();
+		List<Shard> shards = new ArrayList<>();
+		String exclusiveStartShardId = null;
+		do {
+			DescribeStreamRequest request = new DescribeStreamRequest()
+					.withStreamName(streamName);
+			if (exclusiveStartShardId != null) {
+				request.setExclusiveStartShardId(exclusiveStartShardId);
+			}
+			DescribeStreamResult result = kinesisClient.describeStream(request);
+			shards.addAll(result.getStreamDescription().getShards());
+			if (result.getStreamDescription().getHasMoreShards()) {
+				exclusiveStartShardId = result.getStreamDescription().getShards()
+						.get(result.getStreamDescription().getShards().size() - 1)
+						.getShardId();
+			} else {
+				exclusiveStartShardId = null;
+			}
+
+		} while (exclusiveStartShardId != null);
+		kinesisClient.shutdown();
+		// sorted shards by shardId to ensure consistent ordering
+		List<Shard> sortedShards = new ArrayList<>(shards);
+		sortedShards.sort(Comparator.comparing(Shard::getShardId));
+
+		return sortedShards;
 	}
 
 	@Override
@@ -287,6 +441,8 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		aggregation = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.AGGREGATION_ENABLED));
 
 		usePartitionAsHashKey = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.USE_PARTITION_AS_HASH_KEY));
+
+		totalKafkaPartitions = Integer.parseInt(props.get(AmazonKinesisSinkConnector.TOTAL_KAFKA_PARTITIONS));
 
 		flushSync = Boolean.parseBoolean(props.get(AmazonKinesisSinkConnector.FLUSH_SYNC));
 
@@ -328,6 +484,9 @@ public class AmazonKinesisSinkTask extends SinkTask {
 
 	@Override
 	public void stop() {
+		if (shardCacheRefresher != null) {
+			shardCacheRefresher.shutdownNow();
+		}
 		// destroying kinesis producers which were not closed as part of close
 		if (singleKinesisProducerPerPartition) {
 			for (KinesisProducer kp : producerMap.values()) {
