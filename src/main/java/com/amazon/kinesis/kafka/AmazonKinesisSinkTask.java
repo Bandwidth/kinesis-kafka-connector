@@ -185,7 +185,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 								// notify/log that Kinesis Producers have
 								// buffered values
 								// but are not being sent
-								System.out.println(
+								logger.info(
 										"Kafka Consumption has been stopped because Kinesis Producers has buffered messages above threshold");
 								sleepCount = 0;
 							}
@@ -215,7 +215,7 @@ public class AmazonKinesisSinkTask extends SinkTask {
 							// notify/log that Kinesis Producers have buffered
 							// values
 							// but are not being sent
-							System.out.println(
+							logger.info(
 									"Kafka Consumption has been stopped because Kinesis Producers has buffered messages above threshold");
 							sleepCount = 0;
 						}
