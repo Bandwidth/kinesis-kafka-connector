@@ -6,6 +6,8 @@ import com.amazonaws.services.kinesis.model.DescribeStreamRequest;
 import com.amazonaws.services.kinesis.model.DescribeStreamResult;
 import com.amazonaws.services.kinesis.model.Shard;
 import java.math.BigInteger;
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -24,6 +26,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
@@ -307,30 +310,36 @@ public class AmazonKinesisSinkTask extends SinkTask {
 	private ListenableFuture<UserRecordResult> addUserRecord(KinesisProducer kp, String streamName, String partitionKey,
 			boolean usePartitionAsHashKey, SinkRecord sinkRecord) {
 
+		// The schema wasn't getting set when running locally with Localstack.
+		Schema valueSchema = sinkRecord.valueSchema();
+		if (valueSchema == null) {
+			logger.warn("Sink Record Schema is null for record: {}:{}:{}:{}. This only should happen locally.", sinkRecord.topic(), sinkRecord.kafkaPartition(),
+					sinkRecord.key(), sinkRecord.value());
+			valueSchema = Schema.STRING_SCHEMA;
+		}
+
 		logger.debug("Adding user record for stream: {}, partitionKey: {}, kafkaPartition: {}",
 				streamName, partitionKey, sinkRecord.kafkaPartition());
 
-		if (!usePartitionAsHashKey) {
-			logger.debug(
-					"Not using partition as hash key for stream: {}, partitionKey: {}, kafkaPartition: {}",
-					streamName, partitionKey, sinkRecord.kafkaPartition());
-
+		if (usePartitionAsHashKey)
+			return kp.addUserRecord(streamName, partitionKey, Integer.toString(sinkRecord.kafkaPartition()),
+				DataUtility.parseValue(valueSchema, sinkRecord.value()));
+		else
 			return kp.addUserRecord(streamName, partitionKey,
-					DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
-		}
+				DataUtility.parseValue(valueSchema, sinkRecord.value()));
 
-		List<Shard> shards = getCachedKinesisShards();
-
-		// determine which shard to send to
-		int shardIndex = selectShardWithSpread(partitionKey, shards.size(), totalKafkaPartitions);
-		Shard shard = shards.get(shardIndex);
-
-		// get a hash that will send to that shard
-		String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
-
-		// send it
-		return kp.addUserRecord(streamName, partitionKey, shardHashKey,
-				DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
+//		List<Shard> shards = getCachedKinesisShards();
+//
+//		// determine which shard to send to
+//		int shardIndex = selectShardWithSpread(partitionKey, shards.size(), totalKafkaPartitions);
+//		Shard shard = shards.get(shardIndex);
+//
+//		// get a hash that will send to that shard
+//		String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
+//
+//		// send it
+//		return kp.addUserRecord(streamName, partitionKey, shardHashKey,
+//				DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 	}
 
 	/**
@@ -504,8 +513,22 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		config.setRegion(regionName);
 		config.setCredentialsProvider(IAMUtility.createCredentials(regionName, roleARN, roleExternalID, roleSessionName, roleDurationSeconds));
 		config.setMaxConnections(maxConnections);
-		if (!StringUtils.isNullOrEmpty(kinesisEndpoint))
-			config.setKinesisEndpoint(kinesisEndpoint);
+		if (!StringUtils.isNullOrEmpty(kinesisEndpoint)) {
+			try {
+				URL kinesisEndpointUrl = new URL(kinesisEndpoint);
+				config.setKinesisEndpoint(kinesisEndpointUrl.getHost());
+				config.setKinesisPort(kinesisEndpointUrl.getPort());
+
+				// If we are using localstack, we need to disable certificate validation
+				// as localstack uses self-signed certificates
+				if ("https".equals(kinesisEndpointUrl.getProtocol()) && "localstack".equals(
+						kinesisEndpointUrl.getHost())) {
+					config.setVerifyCertificate(false);
+				}
+			} catch (MalformedURLException e) {
+				throw new RuntimeException(e);
+			}
+		}
 
 		config.setAggregationEnabled(aggregation);
 

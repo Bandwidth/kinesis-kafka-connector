@@ -1,0 +1,19 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  schemaVersion: v1.0.0
+  name: kinesis-kafka-connector
+  description: Forked from awslabs/kinesis-kafka-connector
+  annotations:
+    github.com/project-slug: Bandwidth/kinesis-kafka-connector
+  organization: BW
+  costCenter: undefined
+  platformType: OCP4
+  buildPlatform: GitHub Actions
+spec:
+  type: Service
+  owner: github/band-cx
+  lifecycle: Prototype
+  dependsOn:
+    - resource:platform/GitHub Actions
+    - resource:cost-center/undefined
