@@ -21,8 +21,8 @@
 		<kafka.version>3.9.2</kafka.version>
 		<kafka-connect-api.version>3.9.2</kafka-connect-api.version>
 		<aws-java-sdk-sts.version>1.12.410</aws-java-sdk-sts.version>
-		<amazon-kinesis-producer.verion>0.15.8</amazon-kinesis-producer.verion>
-		<amazon-kinesis-client.version>1.15.0</amazon-kinesis-client.version>
+		<amazon-kinesis-producer.verion>0.14.13</amazon-kinesis-producer.verion>
+		<amazon-kinesis-client.version>1.15.3</amazon-kinesis-client.version>
 	</properties>
 	
 	<dependencies>
