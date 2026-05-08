@@ -327,19 +327,6 @@ public class AmazonKinesisSinkTask extends SinkTask {
 		else
 			return kp.addUserRecord(streamName, partitionKey,
 				DataUtility.parseValue(valueSchema, sinkRecord.value()));
-
-//		List<Shard> shards = getCachedKinesisShards();
-//
-//		// determine which shard to send to
-//		int shardIndex = selectShardWithSpread(partitionKey, shards.size(), totalKafkaPartitions);
-//		Shard shard = shards.get(shardIndex);
-//
-//		// get a hash that will send to that shard
-//		String shardHashKey = shard.getHashKeyRange().getStartingHashKey();
-//
-//		// send it
-//		return kp.addUserRecord(streamName, partitionKey, shardHashKey,
-//				DataUtility.parseValue(sinkRecord.valueSchema(), sinkRecord.value()));
 	}
 
 	/**
