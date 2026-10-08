@@ -12,16 +12,16 @@
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<maven.compiler.source>17</maven.compiler.source>
+		<java.version>25</java.version>
+		<maven.compiler.source>${java.version}</maven.compiler.source>
 		<maven.compiler.target>${maven.compiler.source}</maven.compiler.target>
-		<junit.jupiter.version>5.9.1</junit.jupiter.version>
+		<junit.jupiter.version>5.13.4</junit.jupiter.version>
 		<junit.platform.version>1.8.2</junit.platform.version>
-		<slf4j.version>1.7.32</slf4j.version>
+		<slf4j.version>2.0.17</slf4j.version>
 		<kafka.version>4.2.0</kafka.version>
 		<kafka-connect-api.version>4.2.0</kafka-connect-api.version>
-		<aws-java-sdk-sts.version>1.12.410</aws-java-sdk-sts.version>
-		<amazon-kinesis-producer.verion>0.14.13</amazon-kinesis-producer.verion>
+		<aws-java-sdk-sts.version>1.12.797</aws-java-sdk-sts.version>
+		<amazon-kinesis-producer.version>0.15.12</amazon-kinesis-producer.version>
 		<amazon-kinesis-client.version>1.15.3</amazon-kinesis-client.version>
 	</properties>
 	
@@ -46,7 +46,7 @@
 		<dependency>
 			<groupId>com.amazonaws</groupId>
 			<artifactId>amazon-kinesis-producer</artifactId>
-			<version>${amazon-kinesis-producer.verion}</version>
+			<version>${amazon-kinesis-producer.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.junit.jupiter</groupId>
@@ -72,6 +72,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-dependency-plugin</artifactId>
+				<version>3.8.1</version>
 				<executions>
 					<execution>
 						<id>copy-dependencies</id>
@@ -92,6 +93,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-jar-plugin</artifactId>
+				<version>3.4.2</version>
 				<configuration>
 					<finalName>kinesis-kafka-connector</finalName>
 					<archive>
@@ -106,10 +108,15 @@
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>3.5.4</version>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
-				<version>3.11.0</version>
+				<version>3.13.0</version>
 				<configuration>
-					<release>17</release>
+					<release>${java.version}</release>
 				</configuration>
 			</plugin>
 			<!--plugin>
