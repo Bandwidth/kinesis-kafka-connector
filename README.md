@@ -10,6 +10,7 @@ Kafka-Kinesis-Connector can be executed on on-premise nodes or EC2 machines. It 
 
 ### Building
 
+You can build the project by running "maven package" and it will build amazon-kinesis-kafka-connector-X.X.X.jar
 The project requires **Java 25** (JDK 25) and Maven 3.9+. Build it by running `mvn package`, which produces `target/kinesis-kafka-connector.jar` (dependencies are copied to `target/libs/`).
 
 The Java version is controlled by the `java.version` property in `pom.xml`. The Kafka Connect runtime that loads the connector must also run Java 25 or newer.
